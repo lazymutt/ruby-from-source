@@ -1,4 +1,4 @@
-# ruby-from-source
+# Build Ruby from source, pretty easily.
 
 I prefer Python, but I've always been interested in Ruby. Since macOS doesn't ship a current Ruby (or Python) build, you need to compile it from source or use Homebrew. I've never been a fan of Homebrew. 
 
