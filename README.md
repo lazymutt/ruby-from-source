@@ -4,8 +4,8 @@ I prefer Python, but I've always been interested in Ruby. Since macOS doesn't sh
 
 Run the script, and it will build and install Ruby and its requirements in ~/local.
 
-1. chmod u+x build_ruby.sh
-2. ./build_ruby.sh
+1. `chmod u+x build_ruby.sh`
+2. `./build_ruby.sh`
 
 
 It's not difficult to modify if you prefer a different version.
