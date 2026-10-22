@@ -1,4 +1,4 @@
-# build_ruby
+# ruby-from-source
 
 Build a current Ruby from source on macOS, no Homebrew required.
 
@@ -28,7 +28,8 @@ When the build finishes, the script confirms that OpenSSL, YAML, and zlib load a
 ## Usage
 
 ```bash
-chmod u+x build_ruby.sh
+git clone https://github.com/lazymutt/ruby-from-source.git
+cd ruby-from-source
 ./build_ruby.sh
 ```
 
@@ -36,6 +37,12 @@ Then open a new terminal and check:
 
 ```bash
 ruby -v
+```
+
+The downloaded tarballs and build directories stay in `~/local/src`. Once `ruby -v` works, you can delete them to free up space. A rerun downloads them again.
+
+```bash
+rm -rf ~/local/src
 ```
 
 ## Changing versions
