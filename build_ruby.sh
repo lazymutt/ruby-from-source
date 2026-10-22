@@ -1,88 +1,142 @@
 #!/bin/bash
+# Build Ruby and its native dependencies from source into ~/local (macOS).
 
-set -e
+set -euo pipefail
 
-# Directory to install all libraries and Ruby
+# ---- Versions ---------------------------------------------------------------
+RUBY_VERSION="4.0.8"
+OPENSSL_VERSION="3.5.8"     # 3.5 is the LTS series; 3.5.0 has known CVEs
+ZLIB_VERSION="1.3.1"
+YAML_VERSION="0.2.5"
+
 PREFIX="$HOME/local"
+RUBY_PREFIX="$PREFIX/ruby-${RUBY_VERSION}"
+RUBY_SERIES="${RUBY_VERSION%.*}"   # 4.0.8 -> 4.0 (used in the download path)
+NUM_CORES=$(sysctl -n hw.ncpu)
+
 mkdir -p "$PREFIX/src"
 cd "$PREFIX/src"
 
-NUM_CORES=$(sysctl -n hw.ncpu)
-
-# Install Xcode Command Line Tools if needed
+# ---- Xcode Command Line Tools ----------------------------------------------
 if ! xcode-select -p &>/dev/null; then
-    echo "Installing Xcode Command Line Tools..."
-    xcode-select --install
-    echo "Please rerun the script after installation finishes."
-    exit 1
+  echo "Installing Xcode Command Line Tools..."
+  xcode-select --install || true
+  echo "Rerun this script once the installer finishes."
+  exit 1
 fi
 
-# Function to download, build, and install libraries
-build_lib() {
+# ---- Helpers ----------------------------------------------------------------
+# Download (failing loudly on HTTP errors instead of saving an error page),
+# reuse a previous download if it's a valid archive, then extract.
+fetch() {
   local url=$1
-  local folder=$2
-  local config_flags=$3
-
-  echo "Building $folder..."
-  curl -LO "$url"
-  tar -xzf "${url##*/}"
-  cd "$folder"
-  ./configure --prefix="$PREFIX" $config_flags
-  make -j"$NUM_CORES"
-  make install
-  cd ..
+  local file=${url##*/}
+  if [[ -f "$file" ]] && ! tar -tzf "$file" &>/dev/null; then
+    echo "==> Discarding invalid cached $file"
+    rm -f "$file"
+  fi
+  if [[ ! -f "$file" ]]; then
+    echo "==> Downloading $file"
+    curl -fL --retry 3 -o "$file.part" "$url"
+    mv "$file.part" "$file"
+  fi
+  tar -xzf "$file"
 }
 
-# Build dependencies
-build_lib https://zlib.net/zlib-1.3.1.tar.gz zlib-1.3.1 ""
+# Standard ./configure && make && make install, run in a subshell so the
+# working directory is always restored.
+build_autotools() {
+  local url=$1 dir=$2
+  shift 2
+  echo "==> Building $dir"
+  fetch "$url"
+  (
+    cd "$dir"
+    ./configure --prefix="$PREFIX" "$@"
+    make -j"$NUM_CORES"
+    make install
+  )
+}
 
-build_lib https://ftp.gnu.org/gnu/readline/readline-8.2.tar.gz readline-8.2 ""
+# ---- Dependencies -----------------------------------------------------------
+# zlib: GitHub release URLs are permanent; zlib.net drops old versions.
+build_autotools \
+  "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz" \
+  "zlib-${ZLIB_VERSION}"
 
-build_lib https://github.com/openssl/openssl/releases/download/openssl-3.5.0/openssl-3.5.0.tar.gz openssl-3.5.0 \
-  "darwin64-$(uname -m)-cc --openssldir=$PREFIX"
+# OpenSSL uses its own Configure script, not autotools.
+echo "==> Building openssl-${OPENSSL_VERSION}"
+fetch "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
+(
+  cd "openssl-${OPENSSL_VERSION}"
+  ./Configure "darwin64-$(uname -m)-cc" \
+    --prefix="$PREFIX" \
+    --openssldir="$PREFIX/ssl"
+  make -j"$NUM_CORES"
+  make install_sw install_ssldirs   # skip the slow man/html doc install
+)
 
-curl -LO https://pyyaml.org/download/libyaml/yaml-0.2.5.tar.gz
-tar -xzf yaml-0.2.5.tar.gz
-cd yaml-0.2.5
-./configure --prefix="$PREFIX"
-make -j"$NUM_CORES"
-make install
-cd ..
-
-# Build Ruby
-RUBY_VERSION=3.4.4
-curl -O "https://cache.ruby-lang.org/pub/ruby/3.4/ruby-${RUBY_VERSION}.tar.gz"
-tar -xzf "ruby-${RUBY_VERSION}.tar.gz"
-cd "ruby-${RUBY_VERSION}"
-
-export CPPFLAGS="-I$PREFIX/include"
-export LDFLAGS="-L$PREFIX/lib"
-export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
-
-./configure --prefix="$PREFIX/ruby-${RUBY_VERSION}" \
-  --with-openssl-dir="$PREFIX" \
-  --with-readline-dir="$PREFIX" \
-  --with-zlib-dir="$PREFIX" \
-  --with-libyaml-dir="$PREFIX"
-
-make -j"$NUM_CORES"
-# make test
-make install
-
-# Add Ruby to PATH
-SHELL_RC="$HOME/.bash_profile"
-if [[ $SHELL == *zsh ]]; then
-  SHELL_RC="$HOME/.zshrc"
-fi
-
-if ! grep -q "ruby-${RUBY_VERSION}" "$SHELL_RC"; then
-  echo 'export PATH="'$PREFIX'/ruby-'$RUBY_VERSION'/bin:$PATH"' >> "$SHELL_RC"
-  echo "Ruby $RUBY_VERSION installed. Add this to your PATH:"
-  echo "  export PATH=\"$PREFIX/ruby-${RUBY_VERSION}/bin:\$PATH\""
-  echo "This has been added to $SHELL_RC. Restart your shell or run:"
-  echo "  source $SHELL_RC"
+# A source-built OpenSSL ships with no CA certificates, so HTTPS (including
+# `gem install`) fails with "certificate verify failed". Point it at the
+# bundle macOS maintains.
+if [[ -f /etc/ssl/cert.pem ]]; then
+  ln -sf /etc/ssl/cert.pem "$PREFIX/ssl/cert.pem"
 else
-  echo "Ruby path already in $SHELL_RC"
+  echo "WARNING: /etc/ssl/cert.pem not found; put a CA bundle at $PREFIX/ssl/cert.pem" >&2
 fi
 
-echo "Done. Run 'ruby -v' to verify installation."
+# libyaml: required by psych (Ruby no longer bundles it).
+build_autotools \
+  "https://pyyaml.org/download/libyaml/yaml-${YAML_VERSION}.tar.gz" \
+  "yaml-${YAML_VERSION}"
+
+# GNU readline is intentionally not built: Ruby 3.3+ removed the readline
+# extension and uses the pure-Ruby reline instead.
+
+# ---- Ruby -------------------------------------------------------------------
+echo "==> Building ruby-${RUBY_VERSION}"
+fetch "https://cache.ruby-lang.org/pub/ruby/${RUBY_SERIES}/ruby-${RUBY_VERSION}.tar.gz"
+(
+  cd "ruby-${RUBY_VERSION}"
+  export CPPFLAGS="-I$PREFIX/include"
+  export LDFLAGS="-L$PREFIX/lib"
+  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
+
+  ./configure --prefix="$RUBY_PREFIX" \
+    --with-openssl-dir="$PREFIX" \
+    --with-zlib-dir="$PREFIX" \
+    --with-libyaml-dir="$PREFIX" \
+    --disable-install-doc
+
+  make -j"$NUM_CORES"
+  # make test
+  make install
+)
+
+# ---- Verify -----------------------------------------------------------------
+# Ruby's build only warns when an extension fails to compile, so check the
+# important ones actually load and that TLS certificate verification works.
+echo "==> Verifying"
+"$RUBY_PREFIX/bin/ruby" -ropenssl -rpsych -rzlib -rnet/http -e '
+  puts RUBY_DESCRIPTION
+  puts OpenSSL::OPENSSL_LIBRARY_VERSION
+  Net::HTTP.get_response(URI("https://rubygems.org"))
+  puts "HTTPS OK"
+'
+
+# ---- PATH -------------------------------------------------------------------
+case "$SHELL" in
+  */zsh) SHELL_RC="$HOME/.zshrc" ;;
+  *)     SHELL_RC="$HOME/.bash_profile" ;;
+esac
+touch "$SHELL_RC"
+
+if ! grep -qF "$RUBY_PREFIX/bin" "$SHELL_RC"; then
+  # shellcheck disable=SC2016  # $PATH is meant to stay literal in the rc file
+  printf '\nexport PATH="%s:$PATH"\n' "$RUBY_PREFIX/bin" >> "$SHELL_RC"
+  echo "Added $RUBY_PREFIX/bin to PATH in $SHELL_RC"
+else
+  echo "$RUBY_PREFIX/bin is already in $SHELL_RC"
+fi
+
+echo "Done. Open a new terminal (or run: source $SHELL_RC), then check with: ruby -v"
